@@ -7,9 +7,9 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
-	"github.com/rancher/dynamiclistener"
-	dls "github.com/rancher/dynamiclistener/server"
-	"github.com/rancher/wrangler/pkg/webhook"
+	"github.com/oneblock-ai/dynamiclistener/v2"
+	dls "github.com/oneblock-ai/dynamiclistener/v2/server"
+	"github.com/rancher/wrangler/v2/pkg/webhook"
 	"github.com/sirupsen/logrus"
 	v1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -17,10 +17,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/rest"
 
-	"github.com/harvester/webhook/pkg/clients"
-	"github.com/harvester/webhook/pkg/config"
-	"github.com/harvester/webhook/pkg/server/admission"
-	"github.com/harvester/webhook/pkg/server/conversion"
+	"github.com/oneblock-ai/webhook/pkg/clients"
+	"github.com/oneblock-ai/webhook/pkg/config"
+	"github.com/oneblock-ai/webhook/pkg/server/admission"
+	"github.com/oneblock-ai/webhook/pkg/server/conversion"
 )
 
 var (
