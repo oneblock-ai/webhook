@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -16,6 +18,7 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/rest"
+	"k8s.io/utils/pointer"
 
 	"github.com/oneblock-ai/webhook/pkg/clients"
 	"github.com/oneblock-ai/webhook/pkg/config"
@@ -25,6 +28,7 @@ import (
 
 var (
 	port                = int32(443)
+	defaultDevURL       = "localhost:8444"
 	validationPath      = "/v1/webhook/validation"
 	mutationPath        = "/v1/webhook/mutation"
 	conversionPath      = "/v1/webhook/conversion"
@@ -39,6 +43,7 @@ type server struct {
 	name       string
 	options    *config.Options
 	caBundle   []byte
+	devURL     *url.URL
 }
 
 // WebhookServer for listening the AdmissionReview request sent by the apiservers
@@ -88,6 +93,11 @@ func (s *WebhookServer) Start() error {
 		router.Handle(conversionPath, conversion.NewHandler(s.converters, client.RESTMapper))
 	}
 
+	router.Handle("/healthz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	}))
+
 	if err := s.listenAndServe(client, router); err != nil {
 		logrus.Errorf("listen and serve failed, err: %s", err.Error())
 		return err
@@ -104,8 +114,21 @@ func (s *WebhookServer) Start() error {
 }
 
 func (s *WebhookServer) listenAndServe(clients *clients.Clients, handler http.Handler) error {
+	var err error
 	apply := clients.Apply.WithDynamicLookup()
 	caName, certName := s.name+"-ca", s.name+"-tls"
+
+	if s.options.DevMode {
+		devURL := defaultDevURL
+		if len(s.options.DevURL) > 0 {
+			devURL = strings.TrimSpace(s.options.DevURL)
+		}
+		s.devURL, err = url.Parse(devURL)
+		if err != nil {
+			logrus.Fatalf("parse dev url failed, error: %s", err.Error())
+			return err
+		}
+	}
 
 	clients.Core.Secret().OnChange(s.context, "secrets", func(key string, secret *corev1.Secret) (*corev1.Secret, error) {
 		if secret == nil || secret.Name != caName || secret.Namespace != s.options.Namespace || len(secret.Data[corev1.TLSCertKey]) == 0 {
@@ -119,6 +142,7 @@ func (s *WebhookServer) listenAndServe(clients *clients.Clients, handler http.Ha
 		// configure admitter webhook
 		validatingWebhookConfiguration := s.validatingWebhookConfiguration()
 		mutatingWebhookConfiguration := s.mutatingWebhookConfiguration()
+
 		if validatingWebhookConfiguration != nil || mutatingWebhookConfiguration != nil {
 			if err := apply.WithOwner(secret).ApplyObjects(validatingWebhookConfiguration, mutatingWebhookConfiguration); err != nil {
 				return nil, fmt.Errorf("configure validatingwebhookconfiguration %s and mutatingwebhookconfiguration %s failed, error: %w",
@@ -133,7 +157,7 @@ func (s *WebhookServer) listenAndServe(clients *clients.Clients, handler http.Ha
 		return secret, nil
 	})
 
-	tlsName := fmt.Sprintf("%s.%s.svc", s.name, s.options.Namespace)
+	tlsName := getTLSName(s.name, s.server)
 
 	return dls.ListenAndServe(s.context, s.options.HTTPSListenPort, 0, handler, &dls.ListenOpts{
 		Secrets:       clients.Core.Secret(),
@@ -149,6 +173,15 @@ func (s *WebhookServer) listenAndServe(clients *clients.Clients, handler http.Ha
 	})
 }
 
+func getTLSName(name string, s server) string {
+	tlsName := fmt.Sprintf("%s.%s.svc", name, s.options.Namespace)
+
+	if s.options.DevMode {
+		tlsName = s.devURL.Hostname()
+	}
+	return tlsName
+}
+
 func (s *WebhookServer) validatingWebhookConfiguration() *v1.ValidatingWebhookConfiguration {
 	if len(s.validators) == 0 {
 		return nil
@@ -159,7 +192,7 @@ func (s *WebhookServer) validatingWebhookConfiguration() *v1.ValidatingWebhookCo
 		resources = append(resources, validator.Resource())
 	}
 
-	return &v1.ValidatingWebhookConfiguration{
+	validator := &v1.ValidatingWebhookConfiguration{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: s.name,
 		},
@@ -182,6 +215,11 @@ func (s *WebhookServer) validatingWebhookConfiguration() *v1.ValidatingWebhookCo
 			},
 		},
 	}
+	if s.options.DevMode {
+		validator.Webhooks[0].ClientConfig = getWebhookClientURL(validator.Webhooks[0].ClientConfig, s.server, validationPath)
+	}
+
+	return validator
 }
 
 func (s *WebhookServer) mutatingWebhookConfiguration() *v1.MutatingWebhookConfiguration {
@@ -193,7 +231,7 @@ func (s *WebhookServer) mutatingWebhookConfiguration() *v1.MutatingWebhookConfig
 	for _, mutator := range s.mutators {
 		resources = append(resources, mutator.Resource())
 	}
-	return &v1.MutatingWebhookConfiguration{
+	mutator := &v1.MutatingWebhookConfiguration{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: s.name,
 		},
@@ -216,6 +254,12 @@ func (s *WebhookServer) mutatingWebhookConfiguration() *v1.MutatingWebhookConfig
 			},
 		},
 	}
+	if s.options.DevMode {
+		if s.options.DevMode {
+			mutator.Webhooks[0].ClientConfig = getWebhookClientURL(mutator.Webhooks[0].ClientConfig, s.server, mutationPath)
+		}
+	}
+	return mutator
 }
 
 func (s *WebhookServer) configureCRDConversionWebhook(clients *clients.Clients) error {
@@ -244,8 +288,19 @@ func (s *WebhookServer) configureCRDConversionWebhook(clients *clients.Clients) 
 			return err
 		}
 	}
-
 	return nil
+}
+
+func getWebhookClientURL(c v1.WebhookClientConfig, s server, path string) v1.WebhookClientConfig {
+	cfg := c.DeepCopy()
+	var devURL = defaultDevURL
+	if len(s.options.DevURL) > 0 {
+		devURL = fmt.Sprintf("%s:%s", s.devURL.Hostname(), s.devURL.Port())
+	}
+
+	cfg.URL = pointer.String(fmt.Sprintf("https://%s%s", devURL, path))
+	cfg.Service = nil
+	return *cfg
 }
 
 // RegisterValidators registers validator to the webhook server.

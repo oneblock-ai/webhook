@@ -2,6 +2,7 @@ package admission
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 
@@ -123,10 +124,9 @@ func (v *Handler) admit(response *webhook.Response, req *Request) error {
 
 	if err != nil {
 		var admitErr werror.AdmitError
-		if e, ok := err.(werror.AdmitError); ok {
+		var e werror.AdmitError
+		if errors.As(err, &e) {
 			admitErr = e
-		} else {
-			admitErr = werror.NewInternalError(err.Error())
 		}
 		response.Allowed = false
 		response.Result = admitErr.AsResult()
